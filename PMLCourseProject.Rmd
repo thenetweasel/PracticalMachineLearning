@@ -1,0 +1,174 @@
+---
+title: "Practical Machine Learning Course Project"
+author: "Jeffrey A Vance"
+date: "13 February 2016"
+output: pdf_document
+references:
+- URL: http://groupware.les.inf.puc-rio.br/har#wle_paper_section#ixzz400Qta47M
+  author:
+  - family: Velloso
+    given: E.
+  - family: Bulling
+    given: A.
+  - family: Gellersen
+    given: W.
+  - family: Fuks
+    given: H.
+  container-title: Proceedings of 4th International Conference in Cooperation with
+    SIGCHI (Augmentation Human '13)
+  id: velloso2013
+  issued: 2013
+  publisher: ACM SIGCHI
+  title: Qualitative Activity Recognition of Weight Lifting Exercises
+- URL: http://stackoverflow/questions/15968494/how-to-delete-columns-with-na-in-r
+  id: stackoverflow1
+  title: How to delete columns with NA in R
+---
+
+## Assignment
+
+### Background
+Using devices such as Jawbone Up, Nike Fuelband, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement – a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. In this project, your goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. More information is available from the website [here](http://groupware.les.inf.puc-rio.br/har) (see the section on the Weight Lifting Exercise Dataset).
+
+### Data
+
+The training data for this project are available [here](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv)
+
+The test data are available [here](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv)
+
+The data for this project come from this source: http://groupware.les.inf.puc-rio.br/har.[see @velloso2013]. 
+
+## Data Processing
+
+We cache the data as many of the models can take a tremendous amount of time to run.
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(cache=TRUE)
+```
+
+```{r data_processing_load}
+library(caret)
+library(randomForest)
+library(rpart)
+library(rpart.plot)
+library(pROC)
+library(doMC)
+library(iterators)
+registerDoMC(cores=6)
+
+
+set.seed(1971)
+
+complete_trainingset <- read.csv("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv", na.strings=c("NA","#DIV/0!", ""))
+final_testset <- read.csv("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv", na.strings=c("NA","#DIV/0!", ""))
+```
+
+### Feature Selection (stage 1)
+We first remove off the timestamp and username parameters stored in columns 1-5.
+
+The data also has a significant number of columns composed entirely of NAs.  In order to be able to test, we will remove the rows in the training and testing set that are all NA in the testing set. [see @stackoverflow1]  
+
+Finally we remove any columns showing near zero variance.
+
+The resulting structures are shown in Appendix 1.
+
+```{r data_processing_na}
+working.training<-complete_trainingset[,-c(1:5)]
+working.finaltest<-final_testset[,-c(1:5)]
+
+working.training<-working.training[,colSums(is.na(working.finaltest)) != nrow(working.finaltest)]
+working.finaltest<-working.finaltest[,colSums(is.na(working.finaltest)) != nrow(working.finaltest)]
+
+indices.zerovariance <-nearZeroVar(working.training)
+working.training<-working.training[,-indices.zerovariance]
+working.finaltest<-working.finaltest[,-indices.zerovariance]
+```
+
+### Training and Cross-Validation Subsetting of Training Set
+We further partition the training set to give us a working training & validation set.  
+
+```{r data_processing_partition_train_crossval}
+indices.training<-createDataPartition(working.training$classe, p=0.6, list=FALSE)
+trainingset<-working.training[indices.training,]
+crossvalset<-working.training[-indices.training,]
+```
+
+## Analysis
+
+We look first at a classification tree.  This is intended to give us a sense of which variables are involved and identify significant issues (such as the initial 5 columns).  It is not used in the evaluation.
+```{r analysis_classmodel}
+classmodel <- rpart(classe ~ ., data=trainingset, method="class")
+classpredict <- predict(classmodel, crossvalset)
+rpart.plot(classmodel, main="Classification Tree", extra=102, under=TRUE, faclen=0)
+```
+
+We also define a misclassification function to determine out of sample error.
+```{r analysis_misclassification}
+misclassification = function(values, prediction) {
+    sum(prediction!=values)/length(values)
+}
+```
+
+We first look at a random forest (rf) model. 
+```{r analysis_rfmodel}
+rfmodel <- suppressMessages(train(classe~., data=trainingset, method="rf"))
+rfpredict <- predict(rfmodel, crossvalset)
+rfcm<-confusionMatrix(rfpredict, crossvalset$classe)
+rfaccuracy <- rfcm$overall['Accuracy']
+rferror <- misclassification(crossvalset$classe, rfpredict)
+rfresults <- c("Random Forest", rfaccuracy, rferror)
+```
+
+We then look at a boosted trees (gba) model.
+```{r analysis_gbmmodel}
+gbmmodel <- suppressMessages(train(classe~., data=trainingset, method="gbm"))
+gbmpredict <- predict(gbmmodel, crossvalset)
+gbmcm<-confusionMatrix(gbmpredict, crossvalset$classe)
+gbmaccuracy <- gbmcm$overall['Accuracy']
+gbmerror <- misclassification(crossvalset$classe, gbmpredict)
+gbmresults <- c("GBM", gbmaccuracy, gbmerror)
+```
+
+We finally look at a linear discriminant analysis (lda) model.
+```{r analysis_ldamodel}
+ldamodel <- suppressMessages(train(classe~., data=trainingset, method="lda"))
+ldapredict <- predict(ldamodel, crossvalset)
+ldacm<-confusionMatrix(ldapredict, crossvalset$classe)
+ldaaccuracy <- gbmcm$overall['Accuracy']
+ldaerror <- misclassification(crossvalset$classe, ldapredict)
+ldaresults <- c("LDA", ldaaccuracy, ldaerror)
+```
+
+Evaluating the relative outcomes of the models:
+```{r analysis_modelcompare}
+df<-rbind.data.frame(rfresults, gbmresults, ldaresults)
+colnames(df) <- c("Model Type", "Accuracy", "Error")
+df
+```
+
+Looking at the variable importance of our models, we see consistency.
+```{r analysis_plot_var_importance}
+plot(varImp(rfmodel), main = "Relative importance of RF predictor variables", top=10)
+plot(varImp(gbmmodel), main = "Relative importance of GBM predictor variables", top=10)
+plot(varImp(ldamodel), main = "Relative importance of LDA predictor variables", top=10)
+```
+
+## Results
+We then apply the same transformations to the final test set and generate predictions.  As our best model, we use random forest as our predictor.
+
+```{r final_predictions}
+bestmodel<-rfmodel
+testset<-working.finaltest
+
+answers<-predict(bestmodel,testset)
+answers
+
+```
+
+## Appendices
+
+### Appendix 1
+```{r data_processing_output}
+colnames(working.finaltest)
+```
+
+## References
